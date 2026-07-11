@@ -1,0 +1,135 @@
+plugins {
+    id 'application'
+}
+
+group = 'us.easyconnect'
+version = project.findProperty('appVersion') ?: '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    // Build with a pinned JDK toolchain (auto-downloaded if missing).
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    // Put JPMS modules on the module path instead of the classpath.
+    modularity.inferModulePath = true
+}
+
+dependencies {
+    // Add modular dependencies here, e.g.
+    // implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+}
+
+// The uinput backend uses the Foreign Function & Memory API, which is a preview
+// feature in JDK 21 — enable it for compile and every run path below.
+// Footprint tuning was tried here and reverted: capping the heap / stopping JIT
+// at C1 saved only ~6 MB (the ~90 MB floor is structural — JVM + AWT/Swing native
+// libs) AND hurt the real-time input path — -XX:TieredStopAtLevel=1 kept the hot
+// mouse-event loop from being C2-optimized (jittery cursor) and the small heap
+// added GC pauses. Not worth it. The real footprint lever is removing Swing/AWT.
+def previewJvmArgs = ['--enable-preview', '--enable-native-access=' + project.property('mainModule')]
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.compilerArgs += ['--enable-preview']
+}
+
+application {
+    mainModule = project.property('mainModule')
+    mainClass  = project.property('mainClass')
+    applicationDefaultJvmArgs = previewJvmArgs
+}
+
+tasks.named('run') {
+    jvmArgs previewJvmArgs
+}
+
+// ---------------------------------------------------------------------------
+// Custom runtime image (jlink) and native package (jpackage) tasks.
+// Hand-rolled Exec tasks: no third-party plugin, full control over image size.
+// ---------------------------------------------------------------------------
+
+def jdkHome = javaToolchains
+        .launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+        .map { it.metadata.installationPath.asFile.absolutePath }
+
+def toolPath = { String tool -> "${jdkHome.get()}/bin/${tool}" }
+
+// Module path seen by jlink/jpackage: the JDK's own modules + our built jar +
+// every resolved runtime dependency jar.
+def appModulePath = {
+    def jmods = "${jdkHome.get()}/jmods"
+    def jarDir = tasks.named('jar').get().archiveFile.get().asFile.parent
+    def deps = configurations.runtimeClasspath.files.collect { it.parent }.unique()
+    ([jmods, jarDir] + deps).join(File.pathSeparator)
+}
+
+def imageDir   = layout.buildDirectory.dir('image')          // jlink output
+def packageDir = layout.buildDirectory.dir('jpackage')       // jpackage output
+
+// Flags that shrink the runtime image as much as jlink allows.
+def slimJlinkArgs = [
+        '--strip-debug',
+        '--no-header-files',
+        '--no-man-pages',
+        '--compress', 'zip-9',
+]
+
+tasks.register('jlinkImage', Exec) {
+    group = 'distribution'
+    description = 'Build a minimal custom runtime image with jlink.'
+    dependsOn tasks.named('jar')
+
+    def out = imageDir.get().asFile
+    doFirst { delete out }
+
+    commandLine = [
+            toolPath('jlink'),
+            '--module-path', appModulePath(),
+            '--add-modules', project.property('mainModule'),
+            '--launcher', "${project.property('launcherName')}=${project.property('mainModule')}/${project.property('mainClass')}",
+            '--output', out.absolutePath,
+            // Bake the preview/native-access flags into the image's launcher.
+            // jlink's --add-options rejects a value that *starts* with '--'
+            // (fails "no value given"), so lead with an explicit but default
+            // -XX flag purely to satisfy the parser; it changes no runtime
+            // behaviour. The real flags follow.
+            '--add-options=' + (['-XX:+UseG1GC'] + previewJvmArgs).join(' '),
+            *slimJlinkArgs,
+    ]
+
+    doLast {
+        println "\n✔ Runtime image: ${out.absolutePath}"
+        println "  Run it with:   ${out.absolutePath}/bin/${project.property('launcherName')}"
+    }
+}
+
+tasks.register('jpackageImage', Exec) {
+    group = 'distribution'
+    description = 'Build a self-contained native app-image with jpackage (jlink built-in).'
+    dependsOn tasks.named('jar')
+
+    def out = packageDir.get().asFile
+    doFirst { delete out; out.mkdirs() }
+
+    commandLine = [
+            toolPath('jpackage'),
+            '--type', 'app-image',                 // portable folder; no installer tooling needed
+            '--name', project.property('appName'),
+            '--app-version', project.property('appVersion'),
+            '--vendor', project.property('appVendor'),
+            '--module-path', appModulePath(),
+            '--module', "${project.property('mainModule')}/${project.property('mainClass')}",
+            '--dest', out.absolutePath,
+            // jpackage runs jlink internally — pass the same slimming flags.
+            '--jlink-options', slimJlinkArgs.join(' '),
+            // Preview + native access must be present when the app launches.
+            '--java-options', '--enable-preview',
+            '--java-options', '--enable-native-access=' + project.property('mainModule'),
+    ]
+
+    doLast { println "\n✔ App image: ${out.absolutePath}/${project.property('appName')}" }
+}

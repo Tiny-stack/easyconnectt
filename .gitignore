@@ -1,0 +1,35 @@
+# ---- Build outputs (Gradle: PC_Server + Android_app) ----
+build/
+bin/
+.gradle/
+.kotlin/
+
+# ---- Android SDK / machine-specific ----
+local.properties
+.cxx/
+captures/
+*.apk
+*.aab
+
+# ---- Signing / secrets (never commit) ----
+*.keystore
+*.jks
+*.p12
+secrets.properties
+keystore.properties
+
+# ---- IDE / editor ----
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+*.swp
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+
+# Note: the Gradle wrapper (gradlew, gradlew.bat, gradle/wrapper/*) IS committed
+# on purpose so the project builds without a preinstalled Gradle.
