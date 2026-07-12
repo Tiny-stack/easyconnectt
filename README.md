@@ -58,3 +58,8 @@ Open the app → **Scan QR to connect** → point at the PC window → control i
 - Trusted devices (persist the token to auto-reconnect without rescanning).
 - TLS / encrypted transport.
 - Two-finger scroll gesture on the trackpad surface.
+
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
