@@ -14,8 +14,14 @@ import java.nio.charset.StandardCharsets;
  *
  * <pre>
  * Handshake (version-negotiated):
- *   client -> "HELLO &lt;tokenHex&gt; [v&lt;n&gt;] [caps=a,b,...]"   extra fields optional/ignored
+ *   client -> "HELLO &lt;tokenHex&gt; [v&lt;n&gt;] [data] [caps=a,b,...]"  extra fields optional
  *   server -> "OK v&lt;n&gt; caps=a,b,..."  | "DENIED"
+ *
+ * A HELLO carrying the bare word "data" marks a short-lived <em>data channel</em>:
+ * a second connection used only for a bulk file upload. It is authenticated the
+ * same way, but the server does not treat it as "the phone" — it never becomes
+ * the push target and raises no connected/disconnected events. This keeps the
+ * control connection free to carry mouse/keyboard while a big file uploads.
  *
  * The server always answers a good token with an "OK " line that carries its
  * protocol version and a comma-separated capability list. Clients must treat any
@@ -37,6 +43,12 @@ import java.nio.charset.StandardCharsets;
  * File transfer (client -> server):
  *   "FILE &lt;sizeBytes&gt; &lt;nameUrlEncoded&gt;" then &lt;sizeBytes&gt; raw bytes
  *   server -> "FILEOK &lt;savedName&gt;" | "FILEERR &lt;reason&gt;"
+ *
+ * File transfer (server -> client, i.e. PC -&gt; phone):
+ *   "PUSH &lt;sizeBytes&gt; &lt;nameUrlEncoded&gt;" then &lt;sizeBytes&gt; raw bytes
+ *   client -> "PUSHOK &lt;savedName&gt;" | "PUSHERR &lt;reason&gt;"
+ * The phone saves the file to its Downloads folder. Same framing as FILE, just
+ * the other direction, so both peers reuse the read-N-bytes logic.
  * </pre>
  */
 public final class Protocol {
@@ -48,9 +60,15 @@ public final class Protocol {
     public static final String FILE    = "FILE";
     public static final String FILE_OK = "FILEOK";
     public static final String FILE_ERR = "FILEERR";
+    public static final String PUSH     = "PUSH";     // PC -> phone file transfer
+    public static final String PUSH_OK  = "PUSHOK";
+    public static final String PUSH_ERR = "PUSHERR";
+
+    /** HELLO marker for a bulk-upload data channel (see the class docs). */
+    public static final String DATA = "data";
 
     /** Current wire-protocol version, advertised in the handshake. */
-    public static final int VERSION = 1;
+    public static final int VERSION = 3;
 
     // Capability tokens advertised in the handshake. Add new ones here as
     // features land (e.g. "video", "gamepad"); older peers simply ignore
@@ -58,6 +76,7 @@ public final class Protocol {
     public static final String CAP_INPUT   = "input";
     public static final String CAP_FILE    = "file";
     public static final String CAP_HSCROLL = "hscroll";
+    public static final String CAP_PUSH    = "push";  // server can send files to the phone
 
     /** URI scheme encoded into the pairing QR: {@code tcr://host:port/tokenHex}. */
     public static final String QR_SCHEME = "tcr";

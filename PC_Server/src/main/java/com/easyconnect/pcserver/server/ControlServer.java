@@ -12,7 +12,9 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -29,6 +31,10 @@ public final class ControlServer {
 
     private static final boolean DEBUG = Boolean.getBoolean("pcremote.debug");
     private long moveLogCount;
+
+    // The currently-connected phone we can push files to (PC -> phone). Assumes a
+    // single controlling phone; a newer connection replaces the older one.
+    private volatile ClientLink active;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile ServerSocket serverSocket;
@@ -102,6 +108,8 @@ public final class ControlServer {
 
     private void handle(Socket socket) {
         String remote = socket.getRemoteSocketAddress().toString();
+        ClientLink link = null;
+        boolean dataChannel = false;
         try (socket) {
             socket.setTcpNoDelay(true);
             InputStream in = socket.getInputStream();
@@ -113,18 +121,43 @@ public final class ControlServer {
                 listener.onClientRejected(remote);
                 return;
             }
-            reply(out, Protocol.okLine(capabilities()));
-            listener.onClientConnected(remote);
+            // A data channel is a throwaway second connection carrying one bulk
+            // upload. It must not become the push target, and it must not look
+            // like the phone connecting/disconnecting to the UI.
+            dataChannel = isDataChannel(hello);
+            link = new ClientLink(out);
+            if (!dataChannel) {
+                this.active = link; // this phone can now receive PC -> phone pushes
+            }
+            link.send(Protocol.okLine(capabilities()));
+            if (!dataChannel) {
+                listener.onClientConnected(remote);
+            }
 
             String line;
             while (running.get() && (line = Protocol.readLine(in)) != null) {
-                dispatch(line, in, out);
+                dispatch(line, in, link);
             }
         } catch (IOException e) {
             // client dropped
         } finally {
-            listener.onClientDisconnected(remote);
+            if (!dataChannel) {
+                if (active == link) {
+                    active = null; // only clear if a newer client hasn't replaced us
+                }
+                listener.onClientDisconnected(remote);
+            }
         }
+    }
+
+    /** True if the HELLO marks this connection as a bulk-upload data channel. */
+    private static boolean isDataChannel(String hello) {
+        for (String field : hello.split("\\s+")) {
+            if (Protocol.DATA.equals(field)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Capabilities this server advertises, gated by what the input backend can do. */
@@ -132,6 +165,7 @@ public final class ControlServer {
         java.util.List<String> caps = new java.util.ArrayList<>();
         caps.add(Protocol.CAP_INPUT);
         caps.add(Protocol.CAP_FILE);
+        caps.add(Protocol.CAP_PUSH); // this server can send files to the phone
         if (input.supportsHorizontalScroll()) {
             caps.add(Protocol.CAP_HSCROLL);
         }
@@ -148,7 +182,7 @@ public final class ControlServer {
                 && constantTimeEquals(token, parts[1]);
     }
 
-    private void dispatch(String line, InputStream in, OutputStream out) throws IOException {
+    private void dispatch(String line, InputStream in, ClientLink link) throws IOException {
         if (line.isEmpty()) {
             return;
         }
@@ -169,32 +203,88 @@ public final class ControlServer {
             case "SC" -> input.scroll(intAt(p, 1));
             case "SCH" -> input.scrollHorizontal(intAt(p, 1));
             case "K"  -> input.type(line.length() > 2 ? line.substring(2) : "");
-            case "PING" -> reply(out, Protocol.PONG);
-            case Protocol.FILE -> receiveFile(p, in, out);
+            case "PING" -> link.send(Protocol.PONG);
+            case Protocol.FILE -> receiveFile(p, in, link);
+            // Acknowledgements for a PC -> phone push (see pushFile).
+            case Protocol.PUSH_OK -> System.out.println("[push] phone saved: " + argAt(p, 1, "?"));
+            case Protocol.PUSH_ERR -> listener.onError("phone couldn't save the file: " + argAt(p, 1, "?"));
             default -> { /* ignore unknown */ }
         }
     }
 
-    private void receiveFile(String[] p, InputStream in, OutputStream out) throws IOException {
+    private void receiveFile(String[] p, InputStream in, ClientLink link) throws IOException {
         if (p.length < 3) {
-            reply(out, Protocol.FILE_ERR + " bad-header");
+            link.send(Protocol.FILE_ERR + " bad-header");
             return;
         }
         long size;
         try {
             size = Long.parseLong(p[1]);
         } catch (NumberFormatException e) {
-            reply(out, Protocol.FILE_ERR + " bad-size");
+            link.send(Protocol.FILE_ERR + " bad-size");
             return;
         }
         String name = URLDecoder.decode(p[2], StandardCharsets.UTF_8);
         try {
             Path saved = files.receive(in, name, size);
             listener.onFileReceived(saved);
-            reply(out, Protocol.FILE_OK + " " + saved.getFileName());
+            link.send(Protocol.FILE_OK + " " + saved.getFileName());
         } catch (IOException e) {
-            reply(out, Protocol.FILE_ERR + " " + e.getMessage());
+            link.send(Protocol.FILE_ERR + " " + e.getMessage());
             throw e; // stream position is now unreliable — drop the connection
+        }
+    }
+
+    /**
+     * Sends a file from the PC to the currently-connected phone (PC -> phone).
+     * Returns false (and notifies the UI) if no phone is connected.
+     */
+    public boolean pushFile(Path file) {
+        ClientLink link = active;
+        if (link == null) {
+            listener.onError("No phone connected — can't send the file.");
+            return false;
+        }
+        try {
+            link.pushFile(file);
+            System.out.println("[push] sent " + file.getFileName() + " to phone");
+            return true;
+        } catch (IOException e) {
+            listener.onError("Send to phone failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * A connected client we can write to — replies AND server-initiated pushes.
+     * All writes are serialised on one lock so a push and a reply (which run on
+     * different threads) never interleave on the socket.
+     */
+    private static final class ClientLink {
+        private final OutputStream out;
+        private final Object writeLock = new Object();
+
+        ClientLink(OutputStream out) {
+            this.out = out;
+        }
+
+        void send(String lineText) throws IOException {
+            synchronized (writeLock) {
+                out.write((lineText + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            }
+        }
+
+        void pushFile(Path file) throws IOException {
+            long size = Files.size(file);
+            String name = URLEncoder.encode(file.getFileName().toString(), StandardCharsets.UTF_8);
+            synchronized (writeLock) {
+                out.write((Protocol.PUSH + " " + size + " " + name + "\n").getBytes(StandardCharsets.UTF_8));
+                try (InputStream fin = Files.newInputStream(file)) {
+                    fin.transferTo(out); // stream, don't buffer the whole file
+                }
+                out.flush();
+            }
         }
     }
 

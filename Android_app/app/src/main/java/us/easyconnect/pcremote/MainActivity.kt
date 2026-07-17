@@ -27,11 +27,15 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,11 +63,14 @@ import us.easyconnect.pcremote.net.ConnState
 import us.easyconnect.pcremote.net.PairInfo
 import us.easyconnect.pcremote.net.Protocol
 import us.easyconnect.pcremote.net.RemoteClient
+import us.easyconnect.pcremote.settings.Settings
+import us.easyconnect.pcremote.settings.SettingsRepository
 import us.easyconnect.pcremote.ui.PcRemoteTheme
 
 class MainActivity : ComponentActivity() {
 
     private val client: RemoteClient by lazy { (application as PcRemoteApp).client }
+    private val settings: SettingsRepository by lazy { (application as PcRemoteApp).settings }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,7 +87,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             PcRemoteTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    RootScreen(client)
+                    RootScreen(client, settings)
                 }
             }
         }
@@ -94,19 +101,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private const val SENSITIVITY = 1.6f
-private const val MAX_FILE_BYTES = 50 * 1024 * 1024
+// NOTE the `L`: with plain Int literals this silently overflows and yields a
+// nonsense cap. The upload streams in chunks, so this is just a sanity guard —
+// the real limits are disk space and time, not the app's heap.
+private const val MAX_FILE_BYTES = 5500L * 1024 * 1024
 
-// Two-finger scroll: pixels of vertical travel per wheel tick, and whether the
-// content should follow the fingers (phone-style) or move like a mouse wheel.
+// Two-finger scroll: pixels of vertical travel per wheel tick. Direction
+// (invertScroll) and pointer speed (sensitivity) are user settings now.
 private const val SCROLL_STEP = 32f
-private const val SCROLL_NATURAL = false
 
 @Composable
-private fun RootScreen(client: RemoteClient) {
+private fun RootScreen(client: RemoteClient, settingsRepo: SettingsRepository) {
     val state by client.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    // Settings are reachable both before and after pairing, so this lives above
+    // the pair/touchpad split.
+    var showSettings by remember { mutableStateOf(false) }
 
     // Run the keep-alive foreground service exactly while connected.
     val connected = state is ConnState.Connected
@@ -114,17 +125,109 @@ private fun RootScreen(client: RemoteClient) {
         if (connected) ConnectionService.start(context) else ConnectionService.stop(context)
     }
 
+    // Toast when the PC pushes a file to us (it's saved to Downloads).
+    LaunchedEffect(Unit) {
+        client.received.collect { name ->
+            Toast.makeText(context, "Saved to Downloads: $name", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    if (showSettings) {
+        SettingsScreen(settingsRepo, onBack = { showSettings = false })
+        return
+    }
+
     when (val s = state) {
-        is ConnState.Connected -> TouchpadScreen(client)
+        is ConnState.Connected -> TouchpadScreen(
+            client = client,
+            settingsRepo = settingsRepo,
+            onOpenSettings = { showSettings = true }
+        )
         else -> PairScreen(
             state = s,
-            onPaired = { info -> scope.launch { client.connect(info) } }
+            onPaired = { info -> scope.launch { client.connect(info) } },
+            onOpenSettings = { showSettings = true }
         )
     }
 }
 
+/** Touchpad preferences. Reachable before pairing and while connected. */
 @Composable
-private fun PairScreen(state: ConnState, onPaired: (PairInfo) -> Unit) {
+private fun SettingsScreen(repo: SettingsRepository, onBack: () -> Unit) {
+    val s by repo.settings.collectAsStateWithLifecycle()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .safeDrawingPadding()
+            .padding(20.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Settings", fontSize = 22.sp, color = MaterialTheme.colorScheme.primary)
+            OutlinedButton(onClick = onBack) { Text("Done") }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        Text("Pointer speed", fontSize = 16.sp)
+        Text(
+            String.format("%.1f×", s.sensitivity),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Slider(
+            value = s.sensitivity,
+            onValueChange = { repo.setSensitivity(it) },
+            valueRange = Settings.MIN_SENSITIVITY..Settings.MAX_SENSITIVITY
+        )
+
+        SettingSwitch(
+            title = "Invert scrolling",
+            subtitle = "Content follows your fingers, phone-style",
+            checked = s.invertScroll,
+            onChange = { repo.setInvertScroll(it) }
+        )
+
+        SettingSwitch(
+            title = "Two-finger tap = right-click",
+            subtitle = "Extra option — holding one finger still right-clicks too",
+            checked = s.twoFingerRightClick,
+            onChange = { repo.setTwoFingerRightClick(it) }
+        )
+
+        Spacer(Modifier.height(20.dp))
+        TextButton(onClick = { repo.reset() }) { Text("Reset to defaults") }
+    }
+}
+
+@Composable
+private fun SettingSwitch(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 16.sp)
+            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.height(0.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun PairScreen(state: ConnState, onPaired: (PairInfo) -> Unit, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -197,30 +300,56 @@ private fun PairScreen(state: ConnState, onPaired: (PairInfo) -> Unit) {
         ) {
             Text("Scan QR to connect", fontSize = 16.sp)
         }
+
+        Spacer(Modifier.height(12.dp))
+        TextButton(onClick = onOpenSettings) { Text("⚙  Settings") }
     }
 }
 
 @Composable
-private fun TouchpadScreen(client: RemoteClient) {
+private fun TouchpadScreen(
+    client: RemoteClient,
+    settingsRepo: SettingsRepository,
+    onOpenSettings: () -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var typed by remember { mutableStateOf("") }
     var lastTapTime by remember { mutableStateOf(0L) }
+    // Held as a State (not unwrapped with `by`) so the long-lived pointerInput
+    // loop below reads fresh values live, instead of capturing them once and
+    // needing a restart whenever a setting changes.
+    val settingsState = settingsRepo.settings.collectAsStateWithLifecycle()
+    // Non-null while an upload is in flight; drives the progress bar.
+    var upload by remember { mutableStateOf<Upload?>(null) }
 
     val fileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val name = queryName(context, uri)
-            val bytes = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
+            val (name, size) = queryNameAndSize(context, uri)
             when {
-                bytes == null -> toast(context, "Couldn't read file")
-                bytes.size > MAX_FILE_BYTES -> toast(context, "File too large (max 50 MB)")
-                client.sendFile(name, bytes) -> toast(context, "Sent: $name")
-                else -> toast(context, "Send failed")
+                // The wire format is length-prefixed, so an exact size is required.
+                size < 0 -> toast(context, "Couldn't read the file's size")
+                size > MAX_FILE_BYTES ->
+                    toast(context, "File too large (max ${MAX_FILE_BYTES / 1024 / 1024} MB)")
+                else -> {
+                    upload = Upload(name, 0f, 0L, size)
+                    // Streamed: only the file's size limits us, not the app's heap.
+                    val ok = client.sendFile(
+                        name = name,
+                        size = size,
+                        open = { context.contentResolver.openInputStream(uri) },
+                        onProgress = { sent, total ->
+                            // Compose snapshot state is safe to write off the main
+                            // thread; this callback runs on the IO dispatcher.
+                            upload = Upload(name, sent.toFloat() / total, sent, total)
+                        }
+                    )
+                    upload = null
+                    toast(context, if (ok) "Sent: $name" else "Send failed")
+                }
             }
         }
     }
@@ -237,7 +366,10 @@ private fun TouchpadScreen(client: RemoteClient) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Connected", color = MaterialTheme.colorScheme.primary, fontSize = 18.sp)
-            OutlinedButton(onClick = { client.disconnect() }) { Text("Disconnect") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onOpenSettings) { Text("⚙") }
+                OutlinedButton(onClick = { client.disconnect() }) { Text("Disconnect") }
+            }
         }
 
         Spacer(Modifier.height(10.dp))
@@ -259,8 +391,13 @@ private fun TouchpadScreen(client: RemoteClient) {
                     var accX = 0f
                     var accY = 0f
                     fun emit(dx: Float, dy: Float) {
-                        accX += dx * SENSITIVITY
-                        accY += dy * SENSITIVITY
+                        // Last line of defence: a non-finite sensitivity would make
+                        // every delta round to 0 and silently freeze the pointer
+                        // (see SettingsRepository.sanitizeSensitivity).
+                        val raw = settingsState.value.sensitivity // live, per-event
+                        val sens = if (raw.isFinite() && raw > 0f) raw else Settings.DEFAULT_SENSITIVITY
+                        accX += dx * sens
+                        accY += dy * sens
                         val mx = accX.toInt()
                         val my = accY.toInt()
                         if (mx != 0 || my != 0) {
@@ -294,10 +431,13 @@ private fun TouchpadScreen(client: RemoteClient) {
                             @Suppress("UNREACHABLE_CODE") "tap"
                         }
                         when (outcome) {
-                            "scroll" -> { // two fingers down -> trackpad scroll
+                            "scroll" -> { // two fingers down -> trackpad scroll (or two-finger tap)
                                 val hScroll = Protocol.CAP_HSCROLL in client.server.caps
                                 var scrollAccY = 0f
                                 var scrollAccX = 0f
+                                // Total finger travel, so we can tell a two-finger TAP
+                                // (barely moves) from a two-finger scroll (moves).
+                                var twoFingerTravel = 0f
                                 do {
                                     val ev = awaitPointerEvent()
                                     val pressed = ev.changes.filter { it.pressed }
@@ -306,26 +446,34 @@ private fun TouchpadScreen(client: RemoteClient) {
                                         // gesture is steady even if they move unevenly.
                                         val dy = pressed.sumOf { it.positionChange().y.toDouble() }
                                             .toFloat() / pressed.size
+                                        val dx = pressed.sumOf { it.positionChange().x.toDouble() }
+                                            .toFloat() / pressed.size
+                                        twoFingerTravel += abs(dx) + abs(dy)
+                                        val invert = settingsState.value.invertScroll
                                         scrollAccY += dy
                                         val ticksY = (scrollAccY / SCROLL_STEP).toInt()
                                         if (ticksY != 0) {
-                                            client.scroll(if (SCROLL_NATURAL) -ticksY else ticksY)
+                                            client.scroll(if (invert) -ticksY else ticksY)
                                             scrollAccY -= ticksY * SCROLL_STEP
                                         }
                                         // Horizontal only when the server can inject it.
                                         if (hScroll) {
-                                            val dx = pressed.sumOf { it.positionChange().x.toDouble() }
-                                                .toFloat() / pressed.size
                                             scrollAccX += dx
                                             val ticksX = (scrollAccX / SCROLL_STEP).toInt()
                                             if (ticksX != 0) {
-                                                client.scrollH(if (SCROLL_NATURAL) -ticksX else ticksX)
+                                                client.scrollH(if (invert) -ticksX else ticksX)
                                                 scrollAccX -= ticksX * SCROLL_STEP
                                             }
                                         }
                                     }
                                     ev.changes.forEach { it.consume() }
                                 } while (ev.changes.any { it.pressed })
+
+                                // Fingers lifted without really moving = two-finger tap.
+                                // Opt-in; hold-to-right-click keeps working regardless.
+                                if (settingsState.value.twoFingerRightClick && twoFingerTravel < slop) {
+                                    client.click(Protocol.RIGHT)
+                                }
                             }
                             null -> { // held without moving -> right click
                                 client.click(Protocol.RIGHT)
@@ -360,24 +508,18 @@ private fun TouchpadScreen(client: RemoteClient) {
         ) {
             Text(
                 "Drag to move  ·  tap = click  ·  double-tap = double-click\n" +
-                    "hold = right-click  ·  two fingers = scroll",
+                    "hold = right-click  ·  two fingers = scroll" +
+                    if (settingsState.value.twoFingerRightClick) {
+                        "\ntwo-finger tap = right-click"
+                    } else {
+                        ""
+                    },
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
         Spacer(Modifier.height(10.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { client.click(Protocol.LEFT) }, modifier = Modifier.weight(1f)) { Text("Left click") }
-            Button(onClick = { client.click(Protocol.RIGHT) }, modifier = Modifier.weight(1f)) { Text("Right click") }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = { client.scroll(-3) }, modifier = Modifier.weight(1f)) { Text("Scroll ▲") }
-            OutlinedButton(onClick = { client.scroll(3) }, modifier = Modifier.weight(1f)) { Text("Scroll ▼") }
-        }
-
-        Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -401,10 +543,45 @@ private fun TouchpadScreen(client: RemoteClient) {
         }
 
         Spacer(Modifier.height(8.dp))
-        Button(onClick = { fileLauncher.launch("*/*") }, modifier = Modifier.fillMaxWidth()) {
-            Text("Send file to PC")
+        val up = upload
+        if (up != null) {
+            Text(
+                "Sending ${up.name} — ${(up.fraction * 100).toInt()}%  " +
+                    "(${formatBytes(up.sent)} / ${formatBytes(up.total)})",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(4.dp))
+            LinearProgressIndicator(
+                progress = { up.fraction },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        Button(
+            onClick = { fileLauncher.launch("*/*") },
+            enabled = up == null, // one transfer at a time
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (up == null) "Send file to PC" else "Sending…")
         }
     }
+}
+
+/** An upload in flight: what's being sent and how far along it is. */
+private data class Upload(
+    val name: String,
+    val fraction: Float,
+    val sent: Long,
+    val total: Long
+)
+
+/** 1.2 KB / 3.4 MB / 1.1 GB — keeps the progress line readable. */
+private fun formatBytes(n: Long): String = when {
+    n >= 1_000_000_000 -> String.format("%.1f GB", n / 1_000_000_000.0)
+    n >= 1_000_000 -> String.format("%.1f MB", n / 1_000_000.0)
+    n >= 1_000 -> String.format("%.1f KB", n / 1_000.0)
+    else -> "$n B"
 }
 
 @Composable
@@ -417,15 +594,25 @@ private fun StatusLine(text: String, error: Boolean) {
     )
 }
 
-private fun queryName(context: android.content.Context, uri: Uri): String {
+/**
+ * Resolves a picked file's display name and exact byte count. The size frames
+ * the length-prefixed upload, so a provider that doesn't report one yields -1
+ * and the caller refuses the send rather than desyncing the stream.
+ */
+private fun queryNameAndSize(context: android.content.Context, uri: Uri): Pair<String, Long> {
     var name = "file.bin"
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+    var size = -1L
+    context.contentResolver.query(
+        uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null
+    )?.use { c ->
         if (c.moveToFirst()) {
-            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0) c.getString(idx)?.let { name = it }
+            val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIdx >= 0) c.getString(nameIdx)?.let { name = it }
+            val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+            if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
         }
     }
-    return name
+    return Pair(name, size)
 }
 
 private fun toast(context: android.content.Context, msg: String) {

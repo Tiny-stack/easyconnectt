@@ -7,6 +7,7 @@ import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -19,6 +20,7 @@ import java.awt.Desktop;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 
 /**
  * Minimal, friendly control window: shows the pairing QR, a live status line,
@@ -30,11 +32,13 @@ public final class MainWindow implements ServerListener {
     private final Pairing pairing;
     private final Path filesDir;
     private final Runnable onQuit;
+    private final Consumer<Path> onSendFile;
 
     private JFrame frame;
     private JLabel statusLabel;
     private JLabel hintLabel;
     private JLabel titleLabel;
+    private JButton sendToPhoneButton; // enabled only while a phone is connected
 
     // The center swaps between the pairing QR (before a phone connects) and a
     // "connected" confirmation (after), so a stale QR isn't left on screen.
@@ -43,10 +47,11 @@ public final class MainWindow implements ServerListener {
     private static final String CARD_QR = "qr";
     private static final String CARD_CONNECTED = "connected";
 
-    public MainWindow(Pairing pairing, Path filesDir, Runnable onQuit) {
+    public MainWindow(Pairing pairing, Path filesDir, Runnable onQuit, Consumer<Path> onSendFile) {
         this.pairing = pairing;
         this.filesDir = filesDir;
         this.onQuit = onQuit;
+        this.onSendFile = onSendFile;
     }
 
     public void show() {
@@ -107,6 +112,13 @@ public final class MainWindow implements ServerListener {
         JButton openFolder = new JButton("Open received files");
         openFolder.addActionListener(e -> openFolder());
 
+        // Send a PC file to the phone (saved to the phone's Downloads). Disabled
+        // until a phone is connected; onClientConnected/Disconnected toggle it.
+        JButton sendToPhone = new JButton("Send file to phone");
+        sendToPhone.setEnabled(false);
+        sendToPhone.addActionListener(e -> chooseAndSendFile());
+        this.sendToPhoneButton = sendToPhone;
+
         // Window X = hide (daemon keeps running). This button stops the daemon.
         JButton quit = new JButton("Quit server");
         quit.addActionListener(e -> {
@@ -121,12 +133,15 @@ public final class MainWindow implements ServerListener {
         statusLabel.setAlignmentX(0.5f);
         hintLabel.setAlignmentX(0.5f);
         openFolder.setAlignmentX(0.5f);
+        sendToPhone.setAlignmentX(0.5f);
         quit.setAlignmentX(0.5f);
         south.add(statusLabel);
         south.add(javax.swing.Box.createVerticalStrut(4));
         south.add(hintLabel);
         south.add(javax.swing.Box.createVerticalStrut(10));
         south.add(openFolder);
+        south.add(javax.swing.Box.createVerticalStrut(6));
+        south.add(sendToPhone);
         south.add(javax.swing.Box.createVerticalStrut(6));
         south.add(quit);
 
@@ -149,6 +164,24 @@ public final class MainWindow implements ServerListener {
         } catch (Exception e) {
             setStatus("Can't open folder: " + e.getMessage());
         }
+    }
+
+    /** Pick a PC file and hand it to the daemon to push to the phone. */
+    private void chooseAndSendFile() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Send file to phone");
+        if (chooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION && onSendFile != null) {
+            setStatus("Sending " + chooser.getSelectedFile().getName() + " to phone…");
+            onSendFile.accept(chooser.getSelectedFile().toPath());
+        }
+    }
+
+    private void setSendEnabled(boolean enabled) {
+        SwingUtilities.invokeLater(() -> {
+            if (sendToPhoneButton != null) {
+                sendToPhoneButton.setEnabled(enabled);
+            }
+        });
     }
 
     private void setStatus(String text) {
@@ -180,6 +213,7 @@ public final class MainWindow implements ServerListener {
     public void onClientConnected(String remote) {
         showCard(CARD_CONNECTED, "Connected");
         setStatus("Connected: " + remote);
+        setSendEnabled(true); // phone present -> allow PC->phone file send
     }
 
     @Override
@@ -191,6 +225,7 @@ public final class MainWindow implements ServerListener {
     public void onClientDisconnected(String remote) {
         showCard(CARD_QR, "Scan to connect");
         setStatus("Disconnected — waiting for a device…");
+        setSendEnabled(false);
     }
 
     @Override

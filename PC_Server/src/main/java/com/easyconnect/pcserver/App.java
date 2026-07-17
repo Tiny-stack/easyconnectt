@@ -127,6 +127,8 @@ public final class App {
             }
         };
         ipc.setGuiSpawner(spawnGui);
+        // GUI "Send file to phone" -> daemon -> push over the phone connection.
+        ipc.setSendFileHandler(server::pushFile);
 
         DesktopIntegration desktop = new DesktopIntegration();
         listener.setDelegate(new CompositeListener(ipc, desktop.notifications()));

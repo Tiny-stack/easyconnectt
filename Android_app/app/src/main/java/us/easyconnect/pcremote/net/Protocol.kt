@@ -34,15 +34,32 @@ object Protocol {
     const val MIDDLE = "M"
 
     /** Wire-protocol version this client speaks. */
-    const val VERSION = 1
+    const val VERSION = 3
 
     // Capability tokens the server may advertise; check membership before using
     // a feature so this client stays compatible with older/newer servers.
     const val CAP_INPUT = "input"
     const val CAP_FILE = "file"
     const val CAP_HSCROLL = "hscroll"
+    const val CAP_PUSH = "push"          // server can send files to this phone
+
+    /** Liveness probe; the server answers "PONG". Used by the heartbeat. */
+    const val PING = "PING"
+
+    // PC -> phone file transfer: the server sends "PUSH <size> <nameUrlEncoded>"
+    // followed by raw bytes; we save to Downloads and reply with one of these.
+    const val PUSH = "PUSH"
+    fun pushOk(name: String) = "PUSHOK $name"
+    fun pushErr(reason: String) = "PUSHERR $reason"
 
     fun hello(token: String) = "HELLO $token v$VERSION"
+
+    /**
+     * Handshake for a short-lived second connection used only to upload a file.
+     * The "data" marker tells the server not to treat it as the phone itself, so
+     * a big upload never blocks the control connection's mouse/keyboard traffic.
+     */
+    fun helloData(token: String) = "HELLO $token v$VERSION data"
 
     /**
      * Parses a handshake reply like {@code "OK v1 caps=input,file"}. Any reply

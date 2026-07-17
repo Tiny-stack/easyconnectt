@@ -121,6 +121,7 @@ tasks.register('jpackageImage', Exec) {
             '--name', project.property('appName'),
             '--app-version', project.property('appVersion'),
             '--vendor', project.property('appVendor'),
+            '--icon', "${projectDir}/icon.png", // app-image launcher icon (from logo.png)
             '--module-path', appModulePath(),
             '--module', "${project.property('mainModule')}/${project.property('mainClass')}",
             '--dest', out.absolutePath,

@@ -81,7 +81,7 @@ public final class GuiIpcClient {
         int port = parseInt(p[1]);
         Path filesDir = Path.of(p[2]);
         Pairing pairing = Pairing.of(token, port);
-        window = new MainWindow(pairing, filesDir, this::sendQuit);
+        window = new MainWindow(pairing, filesDir, this::sendQuit, this::sendFileToPhone);
         window.show();
     }
 
@@ -93,6 +93,17 @@ public final class GuiIpcClient {
             out.flush();
         } catch (IOException e) {
             System.exit(0); // daemon already gone
+        }
+    }
+
+    /** "Send file to phone" button: hand the chosen file's path to the daemon,
+     *  which pushes it over the phone connection. */
+    private void sendFileToPhone(Path file) {
+        try {
+            out.write("SENDFILE " + file + "\n");
+            out.flush();
+        } catch (IOException e) {
+            System.err.println("[gui] send-to-phone failed: " + e.getMessage());
         }
     }
 

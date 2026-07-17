@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 
 /**
  * The daemon side of the GUI split. Runs a UNIX-domain-socket control channel
@@ -51,6 +52,7 @@ public final class DaemonIpc implements ServerListener, AutoCloseable {
     private volatile String connectedRemote; // null when waiting
     private volatile Runnable onQuit = () -> {};
     private volatile Runnable guiSpawner = () -> {};
+    private volatile Consumer<Path> sendFileHandler = p -> {};
     private volatile long lastToggleNanos;
 
     public DaemonIpc(String token, int port, Path filesDir) {
@@ -68,6 +70,11 @@ public final class DaemonIpc implements ServerListener, AutoCloseable {
     /** How the daemon opens a new pairing window (spawns the {@code gui} subprocess). */
     public void setGuiSpawner(Runnable r) {
         this.guiSpawner = r;
+    }
+
+    /** How the daemon sends a PC-side file to the phone (usually ControlServer::pushFile). */
+    public void setSendFileHandler(Consumer<Path> handler) {
+        this.sendFileHandler = handler;
     }
 
     public Path socketPath() {
@@ -131,9 +138,14 @@ public final class DaemonIpc implements ServerListener, AutoCloseable {
         try {
             String line;
             while ((line = in.readLine()) != null) {
-                if ("QUIT".equals(line.trim())) {
+                String trimmed = line.trim();
+                if ("QUIT".equals(trimmed)) {
                     onQuit.run();
                     return;
+                }
+                if (trimmed.startsWith("SENDFILE ")) {
+                    // Rest of the line is a PC filesystem path (may contain spaces).
+                    sendFileHandler.accept(Path.of(trimmed.substring("SENDFILE ".length())));
                 }
             }
         } finally {
