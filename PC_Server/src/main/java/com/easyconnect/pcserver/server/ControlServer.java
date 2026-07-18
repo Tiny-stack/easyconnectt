@@ -203,7 +203,7 @@ public final class ControlServer {
             case "SC" -> input.scroll(intAt(p, 1));
             case "SCH" -> input.scrollHorizontal(intAt(p, 1));
             case "K"  -> input.type(line.length() > 2 ? line.substring(2) : "");
-            case "PING" -> link.send(Protocol.PONG);
+            case "PING" -> link.trySend(Protocol.PONG); // droppable; skipped during a push
             case Protocol.FILE -> receiveFile(p, in, link);
             // Acknowledgements for a PC -> phone push (see pushFile).
             case Protocol.PUSH_OK -> System.out.println("[push] phone saved: " + argAt(p, 1, "?"));
@@ -259,31 +259,62 @@ public final class ControlServer {
      * A connected client we can write to — replies AND server-initiated pushes.
      * All writes are serialised on one lock so a push and a reply (which run on
      * different threads) never interleave on the socket.
+     *
+     * The lock is a {@link ReentrantLock} rather than a monitor so a low-priority
+     * reply (PONG) can be attempted with {@code tryLock} and skipped when a push
+     * is streaming — otherwise the client handler thread would block for the whole
+     * transfer waiting to answer a heartbeat, and stop reading/injecting mouse.
      */
     private static final class ClientLink {
         private final OutputStream out;
-        private final Object writeLock = new Object();
+        private final java.util.concurrent.locks.ReentrantLock writeLock =
+                new java.util.concurrent.locks.ReentrantLock();
 
         ClientLink(OutputStream out) {
             this.out = out;
         }
 
         void send(String lineText) throws IOException {
-            synchronized (writeLock) {
+            writeLock.lock();
+            try {
                 out.write((lineText + "\n").getBytes(StandardCharsets.UTF_8));
                 out.flush();
+            } finally {
+                writeLock.unlock();
+            }
+        }
+
+        /**
+         * Sends only if the lock is free right now — used for PONG so a heartbeat
+         * during a push is silently skipped instead of blocking the reader. The
+         * phone treats the push bytes it's receiving as proof of life anyway.
+         */
+        void trySend(String lineText) {
+            if (!writeLock.tryLock()) {
+                return; // a push is streaming; skip this heartbeat reply
+            }
+            try {
+                out.write((lineText + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } catch (IOException ignored) {
+                // best effort
+            } finally {
+                writeLock.unlock();
             }
         }
 
         void pushFile(Path file) throws IOException {
             long size = Files.size(file);
             String name = URLEncoder.encode(file.getFileName().toString(), StandardCharsets.UTF_8);
-            synchronized (writeLock) {
+            writeLock.lock();
+            try {
                 out.write((Protocol.PUSH + " " + size + " " + name + "\n").getBytes(StandardCharsets.UTF_8));
                 try (InputStream fin = Files.newInputStream(file)) {
                     fin.transferTo(out); // stream, don't buffer the whole file
                 }
                 out.flush();
+            } finally {
+                writeLock.unlock();
             }
         }
     }

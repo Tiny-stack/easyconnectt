@@ -8,7 +8,11 @@ import java.nio.file.Path;
 
 /**
  * Lightweight desktop hooks for the daemon: display detection and transient
- * {@code notify-send} pop-ups. Everything here is best-effort and cheap.
+ * notification pop-ups. Everything here is best-effort and cheap.
+ *
+ * <p>Notifications are delivered with the platform's built-in, dependency-free
+ * mechanism: {@code notify-send} on Linux and a PowerShell Windows-Runtime toast
+ * on Windows. macOS is a no-op for now (future work).
  *
  * <p>There is intentionally NO persistent tray icon: the only cross-platform,
  * dependency-free option (GTK's {@code yad}) pulls in ~60 MB of GTK, which would
@@ -17,6 +21,9 @@ import java.nio.file.Path;
  * toggles the running daemon's window (see {@code App.toggleIfDaemonRunning}).
  */
 public final class DesktopIntegration {
+
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase().contains("win");
 
     /** True if there's a graphical session at all (else: pure headless, skip UI). */
     public static boolean hasDisplay() {
@@ -37,7 +44,7 @@ public final class DesktopIntegration {
     }
 
     private static boolean hasCommand(String name) {
-        for (String dir : System.getenv().getOrDefault("PATH", "").split(":")) {
+        for (String dir : System.getenv().getOrDefault("PATH", "").split(java.io.File.pathSeparator)) {
             if (!dir.isBlank() && Files.isExecutable(Path.of(dir, name))) {
                 return true;
             }
@@ -65,9 +72,18 @@ public final class DesktopIntegration {
         };
     }
 
+    /** Raises a transient desktop notification via the platform's native tool. */
     private void notifySend(String title, String body) {
+        if (IS_WINDOWS) {
+            notifyWindows(title, body);
+        } else {
+            notifyLinux(title, body);
+        }
+    }
+
+    private void notifyLinux(String title, String body) {
         if (!hasCommand("notify-send")) {
-            return; // Linux only; on Win/macOS this is a no-op (native notifications: future work)
+            return; // no libnotify tool present — nothing to do
         }
         try {
             new ProcessBuilder("notify-send", "-a", "PC Remote", title, body)
@@ -76,6 +92,35 @@ public final class DesktopIntegration {
                     .start();
         } catch (IOException ignored) {
             // best effort
+        }
+    }
+
+    /**
+     * Windows 10/11 toast via the built-in Windows Runtime notification API,
+     * driven from PowerShell — no third-party module (e.g. BurntToast) required.
+     * The title/body are passed through the environment ({@code PCR_TITLE} /
+     * {@code PCR_BODY}) rather than interpolated into the script, so text with
+     * quotes or {@code $}/backtick characters can't break or inject into it.
+     */
+    private void notifyWindows(String title, String body) {
+        String script =
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null;" +
+            "$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);" +
+            "$n=$t.GetElementsByTagName('text');" +
+            "$n.Item(0).AppendChild($t.CreateTextNode($env:PCR_TITLE)) > $null;" +
+            "$n.Item(1).AppendChild($t.CreateTextNode($env:PCR_BODY)) > $null;" +
+            "$toast=[Windows.UI.Notifications.ToastNotification]::new($t);" +
+            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('PC Remote').Show($toast);";
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script);
+            pb.environment().put("PCR_TITLE", title == null ? "" : title);
+            pb.environment().put("PCR_BODY", body == null ? "" : body);
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+              .redirectError(ProcessBuilder.Redirect.DISCARD)
+              .start();
+        } catch (IOException ignored) {
+            // best effort — powershell missing or blocked
         }
     }
 }

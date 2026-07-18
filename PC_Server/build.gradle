@@ -70,6 +70,17 @@ def appModulePath = {
 def imageDir   = layout.buildDirectory.dir('image')          // jlink output
 def packageDir = layout.buildDirectory.dir('jpackage')       // jpackage output
 
+// jpackage is platform-native and demands a platform-native icon format:
+// .ico on Windows, .icns on macOS, .png elsewhere. Passing the wrong extension
+// is a hard error (e.g. "Icon file extension must be .ico" on Windows), so pick
+// by OS and only pass --icon if that file actually exists in the project.
+def platformIcon = {
+    def os = System.getProperty('os.name').toLowerCase()
+    def name = os.contains('win') ? 'icon.ico' : os.contains('mac') ? 'icon.icns' : 'icon.png'
+    def f = file("${projectDir}/${name}")
+    return f.exists() ? f.absolutePath : null
+}
+
 // Flags that shrink the runtime image as much as jlink allows.
 def slimJlinkArgs = [
         '--strip-debug',
@@ -115,13 +126,15 @@ tasks.register('jpackageImage', Exec) {
     def out = packageDir.get().asFile
     doFirst { delete out; out.mkdirs() }
 
+    def icon = platformIcon()
     commandLine = [
             toolPath('jpackage'),
             '--type', 'app-image',                 // portable folder; no installer tooling needed
             '--name', project.property('appName'),
             '--app-version', project.property('appVersion'),
             '--vendor', project.property('appVendor'),
-            '--icon', "${projectDir}/icon.png", // app-image launcher icon (from logo.png)
+            // Native launcher icon, format chosen per-OS (.ico/.icns/.png).
+            *(icon ? ['--icon', icon] : []),
             '--module-path', appModulePath(),
             '--module', "${project.property('mainModule')}/${project.property('mainClass')}",
             '--dest', out.absolutePath,

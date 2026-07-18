@@ -1,0 +1,43 @@
+name: Windows build
+
+# Produces the Windows app-image for PC_Server. jpackage is NOT a cross-compiler
+# — it only targets the OS it runs on — so this must run on a Windows runner.
+# The output is a self-contained folder (bundled JDK 21 + PCServer.exe + icon.ico).
+
+on:
+  workflow_dispatch:          # run manually from the Actions tab
+  push:
+    tags:
+      - 'v*'                  # also build on version tags (e.g. v1.0.0)
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: PC_Server
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # Gradle's toolchain auto-detects this JDK; it also carries the
+          # jpackage tool the build needs.
+          cache: gradle
+          cache-dependency-path: PC_Server/*.gradle
+
+      - name: Build native app-image
+        run: .\gradlew.bat jpackageImage --no-daemon
+
+      - name: Upload app-image
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCServer-windows
+          # jpackage app-image type = a portable folder, not an installer.
+          path: PC_Server/build/jpackage/PCServer
+          if-no-files-found: error

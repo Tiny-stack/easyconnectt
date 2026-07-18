@@ -3,6 +3,7 @@ package us.easyconnect.pcremote.net
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -77,6 +78,11 @@ class RemoteClient(private val context: Context) {
     // When we last heard anything from the PC — the heartbeat's liveness signal.
     @Volatile private var lastHeardNanos: Long = 0L
 
+    // Keeps Wi-Fi out of power-save while connected. Without it the radio parks
+    // between beacons and delivers our high-rate mouse stream in bursts (measured:
+    // stalls up to ~1 s during a smooth drag), which feels like intermittent lag.
+    private var wifiLock: WifiManager.WifiLock? = null
+
     private val _state = MutableStateFlow<ConnState>(ConnState.Disconnected)
     val state: StateFlow<ConnState> = _state
 
@@ -111,6 +117,7 @@ class RemoteClient(private val context: Context) {
                     val box = Channel<String>(Channel.UNLIMITED)
                     outbox = box
                     startWriter(o, box)
+                    acquireWifiLock() // keep Wi-Fi out of power-save (see field)
                     lastHeardNanos = System.nanoTime() // the OK we just read counts
                     _state.value = ConnState.Connected(info)
                     startReader(s, s.getInputStream()) // handle server-initiated PUSH
@@ -382,6 +389,7 @@ class RemoteClient(private val context: Context) {
         var target: OutputStream? = null
         var uri: Uri? = null
         var legacyFile: File? = null
+        var writeError: Exception? = null
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
@@ -402,26 +410,44 @@ class RemoteClient(private val context: Context) {
                 }
             }
 
-            // Copy exactly `size` bytes (draining the socket even if we can't write).
+            // Read exactly `size` bytes off the socket NO MATTER WHAT, so the
+            // stream stays framed for the next command. Writing to storage is
+            // best-effort: if it fails we keep reading (draining) and remember the
+            // error to report afterwards. Conflating "read from socket" with
+            // "write to disk" was the bug — a mid-file write failure left the rest
+            // of the payload in the socket and desynced (then killed) the whole
+            // connection.
             val buf = ByteArray(64 * 1024)
             var remaining = size
             while (remaining > 0) {
                 val toRead = minOf(buf.size.toLong(), remaining).toInt()
                 val n = input.read(buf, 0, toRead)
+                // A real socket EOF can't be drained — this is a genuinely dead
+                // connection, so let it propagate.
                 if (n < 0) throw IOException("stream ended early")
-                target?.write(buf, 0, n)
                 remaining -= n
-                // Receiving bytes IS proof the PC is alive. Without this the
-                // heartbeat would see the reader "silent" for the whole transfer
-                // (we're stuck in this loop, not reading lines) and disconnect us
-                // mid-push — killing any transfer longer than SILENCE_LIMIT_MS.
+                // Receiving bytes IS proof the PC is alive (the reader is stuck in
+                // this loop, not reading lines, for the whole transfer).
                 lastHeardNanos = System.nanoTime()
+                if (writeError == null) {
+                    try {
+                        target?.write(buf, 0, n)
+                    } catch (e: Exception) {
+                        writeError = e // stop writing, keep draining
+                    }
+                }
             }
-            target?.flush()
+            if (writeError == null) target?.flush()
         } finally {
             try { target?.close() } catch (_: Exception) {}
         }
 
+        // Socket is fully drained by here; now surface any problem as PUSHERR
+        // (the connection is fine, just this one file didn't save).
+        if (writeError != null) {
+            cleanup(uri, legacyFile)
+            throw writeError
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             if (uri == null) throw IOException("couldn't create Downloads entry")
             // Clear IS_PENDING so the file becomes visible to the user.
@@ -431,6 +457,15 @@ class RemoteClient(private val context: Context) {
             throw IOException("no Downloads folder (storage permission?)")
         }
         return name
+    }
+
+    /** Removes a half-written Downloads entry after a failed save. */
+    private fun cleanup(uri: Uri?, legacyFile: File?) {
+        try {
+            if (uri != null) context.contentResolver.delete(uri, null, null)
+            legacyFile?.delete()
+        } catch (_: Exception) {
+        }
     }
 
     /** Avoids clobbering: file.ext, file (1).ext, file (2).ext, … (legacy path only). */
@@ -470,7 +505,42 @@ class RemoteClient(private val context: Context) {
         const val SILENCE_LIMIT_MS = 15_000L
     }
 
+    /**
+     * WIFI_MODE_FULL_LOW_LATENCY (API 29+) asks the OS to prioritise latency over
+     * power for our traffic while we hold it and are foregrounded — which is
+     * exactly the touchpad case. Falls back to FULL_HIGH_PERF on older devices.
+     * No permission required.
+     */
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        try {
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                ?: return
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm.createWifiLock(mode, "PCRemote:control").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {
+            // best effort — a missing lock only costs smoothness, not function
+        }
+    }
+
+    private fun releaseWifiLock() {
+        try {
+            wifiLock?.takeIf { it.isHeld }?.release()
+        } catch (_: Exception) {
+        }
+        wifiLock = null
+    }
+
     private fun closeQuietly() {
+        releaseWifiLock()
         outbox?.close() // ends the writer coroutine's for-loop
         outbox = null
         try {

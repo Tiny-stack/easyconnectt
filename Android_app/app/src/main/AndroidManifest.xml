@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Needed to create the low-latency WifiLock that keeps mouse latency steady. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Keep the connection alive while the app is minimized. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
