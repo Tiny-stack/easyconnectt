@@ -3,7 +3,14 @@ plugins {
 }
 
 group = 'us.easyconnect'
-version = project.findProperty('appVersion') ?: '1.0.0'
+
+// Single source of truth for the version: the repo-root VERSION file, shared with
+// the Android app so both halves always ship the same number. Override with
+// -PappVersion=x.y.z (e.g. a CI/tag build).
+if (!project.hasProperty('appVersion')) {
+    ext.appVersion = file('../VERSION').text.trim()
+}
+version = project.property('appVersion')
 
 repositories {
     mavenCentral()

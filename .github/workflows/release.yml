@@ -1,0 +1,53 @@
+name: Release
+
+# One tag -> all three platform builds -> a single GitHub Release with every asset.
+#
+#   git tag v1.2.0 && git push origin v1.2.0
+#
+# Build logic isn't duplicated here: this calls the three reusable workflows
+# (windows-build, linux-appimage, android-release), waits for all of them, then
+# publishes their artifacts to the release for the tag. A manual (workflow_dispatch)
+# run builds everything but does NOT publish — the artifacts are just downloadable.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write             # required to create/update the GitHub Release
+
+jobs:
+  windows:
+    uses: ./.github/workflows/windows-build.yml
+
+  linux:
+    uses: ./.github/workflows/linux-appimage.yml
+
+  android:
+    uses: ./.github/workflows/android-release.yml
+    secrets: inherit          # pass the PCREMOTE_* signing secrets through
+
+  publish:
+    needs: [windows, linux, android]
+    if: startsWith(github.ref, 'refs/tags/')   # publish only for tag builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist            # each artifact lands in dist/<artifact-name>/
+
+      - name: List collected assets
+        run: find dist -type f
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/windows-zip/*.zip
+            dist/linux-appimage/*.AppImage
+            dist/android-apk/*.apk

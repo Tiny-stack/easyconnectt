@@ -1,14 +1,15 @@
 name: Windows build
 
-# Produces the Windows app-image for PC_Server. jpackage is NOT a cross-compiler
-# — it only targets the OS it runs on — so this must run on a Windows runner.
-# The output is a self-contained folder (bundled JDK 21 + PCServer.exe + icon.ico).
+# Produces the Windows app-image for PC_Server and zips it into one release asset.
+# jpackage is NOT a cross-compiler — it only targets the OS it runs on — so this
+# runs on a Windows runner. Output: self-contained folder (bundled JDK 21 +
+# PCServer.exe + icon.ico), zipped to PCServer-<version>-windows-x64.zip.
+#
+# Reusable: called by release.yml on a tag, or run manually for a one-off build.
 
 on:
   workflow_dispatch:          # run manually from the Actions tab
-  push:
-    tags:
-      - 'v*'                  # also build on version tags (e.g. v1.0.0)
+  workflow_call:              # invoked by release.yml
 
 jobs:
   build:
@@ -26,18 +27,22 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-          # Gradle's toolchain auto-detects this JDK; it also carries the
-          # jpackage tool the build needs.
           cache: gradle
           cache-dependency-path: PC_Server/*.gradle
 
       - name: Build native app-image
         run: .\gradlew.bat jpackageImage --no-daemon
 
-      - name: Upload app-image
+      - name: Zip app-image into one release asset
+        shell: pwsh
+        run: |
+          $ver = (Get-Content ..\VERSION -Raw).Trim()
+          Compress-Archive -Path build\jpackage\PCServer `
+            -DestinationPath "build\jpackage\PCServer-$ver-windows-x64.zip"
+
+      - name: Upload Windows zip
         uses: actions/upload-artifact@v4
         with:
-          name: PCServer-windows
-          # jpackage app-image type = a portable folder, not an installer.
-          path: PC_Server/build/jpackage/PCServer
+          name: windows-zip
+          path: PC_Server/build/jpackage/PCServer-*-windows-x64.zip
           if-no-files-found: error

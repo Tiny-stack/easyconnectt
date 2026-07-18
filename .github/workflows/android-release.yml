@@ -1,0 +1,64 @@
+name: Android release APK
+
+# Builds the signed release APK. The keystore + passwords come from encrypted repo
+# secrets (Settings → Secrets and variables → Actions) — never committed:
+#   PCREMOTE_KEYSTORE_BASE64    - base64 of your .jks  (base64 -w0 pcremote-release.jks)
+#   PCREMOTE_KEYSTORE_PASSWORD  - keystore password
+#   PCREMOTE_KEY_ALIAS          - key alias (e.g. pcremote)
+#   PCREMOTE_KEY_PASSWORD       - key password
+#
+# Reusable: called by release.yml (with secrets: inherit) on a tag, or run
+# manually for a one-off signed build (APK appears as a downloadable artifact).
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Android_app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: Android_app/**/*.gradle*
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Decode release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.PCREMOTE_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/pcremote-release.jks"
+
+      - name: Build signed release APK
+        env:
+          PCREMOTE_KEYSTORE: ${{ runner.temp }}/pcremote-release.jks
+          PCREMOTE_KEYSTORE_PASSWORD: ${{ secrets.PCREMOTE_KEYSTORE_PASSWORD }}
+          PCREMOTE_KEY_ALIAS: ${{ secrets.PCREMOTE_KEY_ALIAS }}
+          PCREMOTE_KEY_PASSWORD: ${{ secrets.PCREMOTE_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Stage APK with a versioned name
+        run: |
+          ver="$(tr -d '[:space:]' < ../VERSION)"
+          mkdir -p "$RUNNER_TEMP/out"
+          cp app/build/outputs/apk/release/app-release.apk \
+             "$RUNNER_TEMP/out/PCRemote-${ver}.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ runner.temp }}/out/PCRemote-*.apk
+          if-no-files-found: error

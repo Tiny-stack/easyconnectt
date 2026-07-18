@@ -107,7 +107,7 @@ is no longer trustworthy, so reusing it would desync the protocol.
 This direction is newer and has one extra hop, because of the daemon/GUI split:
 the **daemon** owns the phone socket, but the **window** is a separate process.
 
-```
+ss```
  [GUI window process]                    [daemon process]                [phone]
   "Send file to phone"
       JFileChooser

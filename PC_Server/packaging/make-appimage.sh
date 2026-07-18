@@ -15,8 +15,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."          # -> PC_Server
 
-APPNAME="$(grep '^appName='    gradle.properties | cut -d= -f2)"   # PCServer
-VERSION="$(grep '^appVersion=' gradle.properties | cut -d= -f2)"   # 1.0.0
+APPNAME="$(grep '^appName=' gradle.properties | cut -d= -f2)"      # PCServer
+# Version = the repo-root VERSION file (shared with the Android app).
+VERSION="$(tr -d '[:space:]' < ../VERSION)"                        # e.g. 1.0.0
 ARCH="${ARCH:-x86_64}"
 
 IMG="build/jpackage/${APPNAME}"          # jpackage app-image folder
@@ -24,8 +25,8 @@ APPDIR="build/appimage/${APPNAME}.AppDir"
 OUT="build/appimage/${APPNAME}-${VERSION}-${ARCH}.AppImage"
 
 # 1. Produce the portable app-image (bundled JRE + native launcher).
-echo "==> jpackage app-image"
-./gradlew jpackageImage --no-daemon
+echo "==> jpackage app-image (version ${VERSION})"
+./gradlew jpackageImage --no-daemon -PappVersion="${VERSION}"
 [ -x "${IMG}/bin/${APPNAME}" ] || { echo "ERROR: launcher ${IMG}/bin/${APPNAME} not found"; exit 1; }
 
 # 2. Lay out the AppDir: the whole app-image at the root, plus the three files

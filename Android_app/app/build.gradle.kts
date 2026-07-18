@@ -3,6 +3,24 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Reads a signing credential from an environment variable first, then a Gradle
+// property (e.g. ~/.gradle/gradle.properties). Returns null if neither is set,
+// so a machine without the keystore still builds (falls back to the debug key).
+fun signingCredential(name: String): String? =
+    System.getenv(name) ?: (project.findProperty(name) as String?)
+
+// Version is the repo-root VERSION file — the SAME file the PC server reads — so
+// the app and PC server always ship the same version. Override with
+// -PversionName=x.y.z. versionCode is derived deterministically from the digits
+// (major*10000 + minor*100 + patch), so bumping VERSION bumps both.
+val appVersionName: String =
+    (project.findProperty("versionName") as String?)
+        ?: rootProject.file("../VERSION").readText().trim()
+val appVersionCode: Int =
+    (project.findProperty("versionCode") as String?)?.toInt()
+        ?: Regex("""\d+""").findAll(appVersionName).map { it.value.toInt() }.toList()
+            .let { (it.getOrElse(0) { 0 } * 10000) + (it.getOrElse(1) { 0 } * 100) + it.getOrElse(2) { 0 } }
+
 android {
     namespace = "us.easyconnect.pcremote"
     compileSdk = 36
@@ -11,9 +29,24 @@ android {
         applicationId = "us.easyconnect.pcremote"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         vectorDrawables { useSupportLibrary = true }
+    }
+
+    signingConfigs {
+        create("release") {
+            // Credentials are read from env vars or Gradle properties — NEVER
+            // hardcode them and never commit the keystore (.gitignore covers
+            // *.jks/*.keystore). Populated only when PCREMOTE_KEYSTORE is set.
+            val storePath = signingCredential("PCREMOTE_KEYSTORE")
+            if (storePath != null) {
+                storeFile = file(storePath)
+                storePassword = signingCredential("PCREMOTE_KEYSTORE_PASSWORD")
+                keyAlias = signingCredential("PCREMOTE_KEY_ALIAS")
+                keyPassword = signingCredential("PCREMOTE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -25,9 +58,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Sign with the debug key so the minified APK is directly installable.
-            // Swap for a real release keystore before publishing.
-            signingConfig = signingConfigs.getByName("debug")
+            // Use the real release keystore when its credentials are provided
+            // (env vars / ~/.gradle/gradle.properties); otherwise fall back to the
+            // debug key so the build still works locally/CI without secrets.
+            signingConfig = if (signingCredential("PCREMOTE_KEYSTORE") != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
