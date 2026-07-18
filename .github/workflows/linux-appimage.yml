@@ -1,0 +1,43 @@
+name: Linux AppImage
+
+# Builds a single distributable PCServer .AppImage. jpackage can't emit AppImage,
+# so packaging/make-appimage.sh wraps the jpackage app-image with appimagetool.
+#
+# Pinned to ubuntu-22.04 ON PURPOSE: the bundled JRE/launcher link against the
+# build host's glibc, so building on an older base lowers the glibc floor and the
+# AppImage runs on more (and older) distros. x86_64 + glibc only (no Alpine/musl).
+
+on:
+  workflow_dispatch:          # run manually from the Actions tab
+  push:
+    tags:
+      - 'v*'                  # also build on version tags (e.g. v1.0.0)
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: PC_Server
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: PC_Server/*.gradle
+
+      - name: Build AppImage
+        run: bash packaging/make-appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCServer-AppImage
+          path: PC_Server/build/appimage/*.AppImage
+          if-no-files-found: error

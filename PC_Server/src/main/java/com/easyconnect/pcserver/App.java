@@ -93,28 +93,52 @@ public final class App {
         // hasDisplay() only reads env vars, so it never loads AWT.
         boolean headless = hasFlag(args, "--nogui") || !DesktopIntegration.hasDisplay();
         if (headless) {
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                server.stop();
-                input.close();
-            }));
-            System.out.println();
-            System.out.println(pairing.qrAscii());
-            System.out.println("Scan the QR above with the PC Remote app. Ctrl+C to quit.");
-            Thread.currentThread().join(); // keep the daemon accept-thread alive
+            runHeadless(server, input, pairing);
         } else {
-            runDaemon(listener, server, input, token, boundPort, filesDir);
+            runDaemon(listener, server, input, token, boundPort, filesDir, pairing);
+        }
+    }
+
+    /**
+     * Pure headless keep-alive: print the ASCII QR and block, serving input over
+     * the network with no pairing window or control socket. Used for {@code
+     * --nogui}, truly headless logins, and as the graceful fallback when the
+     * daemon's control socket can't be opened (see {@link #runDaemon}).
+     */
+    private static void runHeadless(ControlServer server, InputController input, Pairing pairing) {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.stop();
+            input.close();
+        }));
+        System.out.println();
+        System.out.println(pairing.qrAscii());
+        System.out.println("Scan the QR above with the PC Remote app. Ctrl+C to quit.");
+        try {
+            Thread.currentThread().join(); // keep the accept-thread alive
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
     /**
      * Desktop daemon: server + IPC channel + tray + notifications, GUI spawned as
-     * a separate process. Blocks until the process is killed.
+     * a separate process. Blocks until the process is killed. If the control
+     * socket can't be opened — e.g. AF_UNIX unsupported (Wine, pre-1809 Windows) —
+     * falls back to {@link #runHeadless} instead of crashing the already-running
+     * server; the phone still connects and controls input, just with no window.
      */
     private static void runDaemon(ForwardingListener listener, ControlServer server,
                                   InputController input, String token, int boundPort,
-                                  Path filesDir) throws Exception {
+                                  Path filesDir, Pairing pairing) throws Exception {
         DaemonIpc ipc = new DaemonIpc(token, boundPort, filesDir);
-        ipc.start();
+        try {
+            ipc.start();
+        } catch (Exception e) {
+            System.err.println("[daemon] control socket unavailable (" + e.getMessage()
+                    + ") — falling back to headless mode (no pairing window).");
+            runHeadless(server, input, pairing);
+            return;
+        }
         ipc.onQuit(() -> System.exit(0));
 
         // How the daemon opens a pairing window: spawn the "gui" subprocess.
