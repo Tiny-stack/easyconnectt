@@ -4,7 +4,7 @@ Control your PC from your phone — move the cursor, click, scroll, type, and se
 files. The phone pairs by **scanning a QR code** shown on the PC, so only your
 device can connect (other phones on the same Wi-Fi are locked out).
 
-![alt text](https://raw.githubusercontent.com/Tiny-stack/easyconnectt/refs/heads/main/logo.jpeg)
+![alt text](https://raw.githubusercontent.com/Tiny-stack/easyconnectt/refs/heads/main/logo.png)
 
 ## Components
 
